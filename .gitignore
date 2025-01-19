@@ -1,0 +1,22 @@
+# Environment variables
+.env
+.env.*
+
+# Dependencies
+node_modules/
+venv/
+
+# Logs
+logs/
+*.log
+
+# macOS system files
+.DS_Store
+
+# IDE files
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc 
