@@ -1,6 +1,6 @@
 # Environment variables
-.env
-.env.*
+.env*
+!.env.example
 
 # Dependencies
 node_modules/
@@ -20,3 +20,6 @@ logs/
 # Python cache
 __pycache__/
 *.pyc 
+
+
+Documentation/

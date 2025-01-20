@@ -4,12 +4,14 @@
   "description": "Solana trading bot for copying trades",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "node src/test.js",
-    "dev": "nodemon src/index.js",
-    "validate-csv": "node src/utils/validate-csv.js"
+    "start": "cross-env NODE_ENV=production node src/index.js",
+    "test": "cross-env NODE_ENV=test node src/test.js",
+    "dev": "cross-env NODE_ENV=development node src/index.js",
+    "validate-csv": "cross-env NODE_ENV=development node src/utils/validate-csv.js"
   },
   "dependencies": {
+    "@metaplex-foundation/mpl-token-metadata": "^3.3.0",
+    "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.98.0",
     "csv-parse": "^5.6.0",
     "dotenv": "^16.4.7",
@@ -17,6 +19,7 @@
     "winston-syslog": "^2.7.1"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "nodemon": "^3.1.9"
   }
 }

@@ -2,10 +2,13 @@ const { Connection } = require('@solana/web3.js');
 const Config = require('./config/config');
 const logger = require('./utils/logger');
 const walletConfig = require('./services/wallet-config');
+const { logEnvironment } = require('./utils/env-logger');
 
 async function testConfiguration() {
     try {
-        // Test different log levels
+        // Log environment variables first
+        logEnvironment();
+        
         logger.info('Starting configuration test');
 
         // Test wallet configuration loading

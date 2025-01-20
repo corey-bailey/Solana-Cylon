@@ -1,7 +1,7 @@
 const winston = require('winston');
 const Config = require('../config/config');
 const { createLogger, format, transports } = winston;
-const Syslog = require('winston-syslog').Syslog;
+const path = require('path');
 
 // Create logs directory if it doesn't exist
 const fs = require('fs');
@@ -9,77 +9,105 @@ if (!fs.existsSync('logs')) {
     fs.mkdirSync('logs');
 }
 
-// Custom format for macOS Console readability
-const macOSFormat = format.printf(({ level, message, timestamp, ...metadata }) => {
-    let msg = `${timestamp} [${level}]: ${message}`;
-    if (Object.keys(metadata).length > 0) {
-        msg += ` ${JSON.stringify(metadata)}`;
-    }
-    return msg;
+// Custom format for all outputs
+const logFormat = format.printf(({ level, message, timestamp, ...args }) => {
+    const metadata = { ...args };
+    delete metadata.metadata; // Remove nested metadata
+    return `${timestamp} [${level}]: ${message} ${JSON.stringify(metadata, null, 2)}`;
 });
 
-const logger = createLogger({
-    level: Config.LOG_LEVEL,
-    format: format.combine(
-        format.timestamp(),
-        format.metadata(),
-        macOSFormat
-    ),
-    transports: [
-        // Console output
-        new transports.Console({
-            format: format.simple()
-        }),
-        // File output
-        new transports.File({ 
-            filename: 'logs/error.log', 
-            level: 'error' 
-        }),
-        new transports.File({ 
-            filename: 'logs/combined.log' 
-        }),
-        // macOS system log
-        new Syslog({
-            app_name: 'solana-trade-bot',
-            facility: 'local0',
-            protocol: 'unix',
-            path: '/var/run/syslog',
-            format: format.combine(
-                format.timestamp(),
-                format.json()
-            )
-        })
-    ]
-});
+// Create separate loggers for different purposes
+const createCustomLogger = (filename, level = 'info') => {
+    return createLogger({
+        level: Config.LOG_LEVEL,
+        format: format.combine(
+            format.timestamp(),
+            format.splat(),
+            logFormat
+        ),
+        transports: [
+            // Console output
+            new transports.Console({
+                format: format.combine(
+                    format.timestamp(),
+                    format.colorize(),
+                    logFormat
+                )
+            }),
+            // File output
+            new transports.File({ 
+                filename: path.join('logs', filename),
+                format: format.combine(
+                    format.timestamp(),
+                    logFormat
+                )
+            })
+        ]
+    });
+};
 
-// Add error event handlers
-logger.on('error', (error) => {
-    console.error('Logger error:', error);
-});
+// Create specific loggers
+const userWalletLogger = createCustomLogger('user-wallet.log');
+const watchedWalletLogger = createCustomLogger('watched-wallets.log');
+const systemLogger = createCustomLogger('system.log');
 
 // Helper methods for structured logging
-logger.logTrade = (action, data) => {
-    logger.info(`Trade ${action}`, {
-        type: 'TRADE',
-        action,
-        ...data
-    });
+const logger = {
+    // System-level logging
+    info: (message, metadata) => {
+        systemLogger.info(message, metadata);
+    },
+    warn: (message, metadata) => {
+        systemLogger.warn(message, metadata);
+    },
+    error: (message, metadata) => {
+        systemLogger.error(message, metadata);
+    },
+    debug: (message, metadata) => {
+        systemLogger.debug(message, metadata);
+    },
+
+    // User wallet specific logging
+    userWallet: {
+        info: (message, metadata) => {
+            userWalletLogger.info(message, metadata);
+            systemLogger.info(message, { ...metadata, context: 'UserWallet' });
+        },
+        error: (message, metadata) => {
+            userWalletLogger.error(message, metadata);
+            systemLogger.error(message, { ...metadata, context: 'UserWallet' });
+        }
+    },
+
+    // Watched wallet specific logging
+    watchedWallet: {
+        info: (message, metadata) => {
+            watchedWalletLogger.info(message, metadata);
+            systemLogger.info(message, { ...metadata, context: 'WatchedWallet' });
+        },
+        error: (message, metadata) => {
+            watchedWalletLogger.error(message, metadata);
+            systemLogger.error(message, { ...metadata, context: 'WatchedWallet' });
+        }
+    },
+
+    // Error logging with stack traces
+    logError: (error, context = {}) => {
+        const errorLog = {
+            message: error.message,
+            stack: error.stack,
+            ...context
+        };
+        systemLogger.error('Error occurred', errorLog);
+        
+        // Log to specific files based on context
+        if (context.context?.includes('UserWallet')) {
+            userWalletLogger.error('Error occurred', errorLog);
+        }
+        if (context.context?.includes('WatchedWallet')) {
+            watchedWalletLogger.error('Error occurred', errorLog);
+        }
+    }
 };
 
-logger.logWallet = (action, data) => {
-    logger.info(`Wallet ${action}`, {
-        type: 'WALLET',
-        action,
-        ...data
-    });
-};
-
-logger.logError = (error, context = {}) => {
-    logger.error(error.message, {
-        type: 'ERROR',
-        stack: error.stack,
-        ...context
-    });
-};
-
-module.exports = logger; 
+module.exports = logger;
