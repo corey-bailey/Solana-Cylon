@@ -5,7 +5,10 @@
   "main": "src/index.js",
   "scripts": {
     "start": "cross-env NODE_ENV=production node src/index.js",
-    "test": "cross-env NODE_ENV=test node src/test.js",
+    "test": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/**/*.test.js'",
+    "test:setup": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/setup.js'",
+    "test:token": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/token-info.test.js'",
+    "test:monitor": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/transaction-monitor.test.js'",
     "dev": "cross-env NODE_ENV=development node src/index.js",
     "validate-csv": "cross-env NODE_ENV=development node src/utils/validate-csv.js"
   },
@@ -19,7 +22,10 @@
     "winston-syslog": "^2.7.1"
   },
   "devDependencies": {
+    "chai": "^4.5.0",
     "cross-env": "^7.0.3",
+    "mocha": "^10.8.2",
     "nodemon": "^3.1.9"
-  }
+  },
+  "type": "module"
 }

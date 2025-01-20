@@ -1,82 +1,156 @@
-const { Connection, PublicKey } = require('@solana/web3.js');
-const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-const { Metadata } = require('@metaplex-foundation/mpl-token-metadata');
-const logger = require('../utils/logger');
-const Config = require('../config/config');
-const walletConfig = require('./wallet-config');
+import { Connection, PublicKey } from '@solana/web3.js';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import pkg from '@metaplex-foundation/mpl-token-metadata';
+const { Metadata } = pkg;
+import logger from '../utils/logger.js';
+import config from '../config/config.js';
+import walletConfig from './wallet-config.js';
 
 class TransactionMonitor {
-    constructor() {
-        this.connection = new Connection(Config.SOLANA_RPC_URL);
+    constructor(options = {}) {
+        this.isTestMode = options.isTestMode || false;
+        this.connection = new Connection(config.SOLANA_RPC_URL);
         this.watchedTransactions = new Map();
-        this.startTime = Date.now() / 1000;
-        this.lastRequestTime = 0;  // Track last request time
-        this.requestDelay = 1000;   // Base delay between requests (1000ms)
+        this.startTime = 0; // Initialize to 0
+        this.lastRequestTime = 0;
+        this.requestDelay = 60000;   // One request per minute
+        this.maxRequestsPerMinute = 6;
+        this.requestCount = 0;
+        this.requestResetTime = Date.now();
+        this.totalRequests = 0;
+        this.requestsThisMinute = 0;
+        this.lastCounterUpdate = Date.now();
+        this.requestQueue = [];
+        this.hasInitialCheck = false;  // Track if initial check is done
         
         logger.info('Transaction Monitor Started', {
             environment: process.env.NODE_ENV || 'development',
-            network: Config.SOLANA_NETWORK,
-            rpcUrl: Config.SOLANA_RPC_URL,
-            startTime: new Date(this.startTime * 1000).toISOString()
+            network: config.SOLANA_NETWORK,
+            rpcUrl: config.SOLANA_RPC_URL,
+            startTime: new Date(this.startTime * 1000).toISOString(),
+            checkInterval: '60 seconds'
+        });
+
+        // In test mode, we process requests immediately and don't start intervals
+        if (this.isTestMode) {
+            this.processRequest = this.processRequestImmediate;
+        } else {
+            this.processRequest = this.processRequestQueued;
+            this.startRequestCounter();
+            this.startRequestProcessor();
+        }
+    }
+
+    // Add request counter display
+    startRequestCounter() {
+        if (this.isTestMode) return; // Don't start counter in test mode
+        
+        this.counterInterval = setInterval(() => {
+            const now = Date.now();
+            const timeWindow = ((now - this.lastCounterUpdate) / 1000).toFixed(0);
+            
+            process.stdout.write(`\r\x1b[K`);
+            process.stdout.write(
+                `RPC Requests - Total: ${this.totalRequests}, ` +
+                `Last ${timeWindow}s: ${this.requestsThisMinute}, ` +
+                `Rate: ${(this.requestsThisMinute / (timeWindow || 1)).toFixed(1)}/s, ` +
+                `Queue: ${this.requestQueue.length}`
+            );
+
+            if (now - this.lastCounterUpdate >= 60000) {
+                this.requestsThisMinute = 0;
+                this.lastCounterUpdate = now;
+            }
+        }, 1000);
+    }
+
+    // Update request processor to handle initial check
+    startRequestProcessor() {
+        this.processorInterval = setInterval(async () => {
+            if (this.requestQueue.length > 0) {
+                const batch = this.requestQueue.splice(0, 1);
+                for (const request of batch) {
+                    try {
+                        const result = await request.operation();
+                        request.resolve(result);
+                    } catch (error) {
+                        request.reject(error);
+                    }
+                }
+                this.totalRequests++;
+                this.requestsThisMinute++;
+            }
+        }, this.hasInitialCheck ? this.requestDelay : 5000); // Faster processing for initial check
+    }
+
+    // Process request immediately (for tests)
+    async processRequestImmediate(operation) {
+        try {
+            const result = await operation();
+            this.totalRequests++;
+            this.requestsThisMinute++;
+            return result;
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    // Process request via queue (for production)
+    async processRequestQueued(operation) {
+        return new Promise((resolve, reject) => {
+            this.requestQueue.push({ operation, resolve, reject });
         });
     }
 
-    // Add delay between requests
-    async throttleRequest() {
-        const now = Date.now();
-        const timeSinceLastRequest = now - this.lastRequestTime;
-        
-        if (timeSinceLastRequest < this.requestDelay) {
-            await new Promise(resolve => 
-                setTimeout(resolve, this.requestDelay - timeSinceLastRequest)
-            );
-        }
-        
-        this.lastRequestTime = Date.now();
+    // Update queueRequest to use the appropriate process method
+    async queueRequest(operation) {
+        return this.processRequest(operation);
     }
 
-    // Retry with exponential backoff
-    async retryWithBackoff(operation, maxRetries = 3, initialDelay = 4000) {
+    // Update retry with queued requests
+    async retryWithBackoff(operation, maxRetries = 3, initialDelay = 5000) {
         let retries = 0;
         let delay = initialDelay;
 
         while (retries < maxRetries) {
             try {
-                await this.throttleRequest();
-                const result = await operation();
-                return result;
+                return await this.queueRequest(operation);
             } catch (error) {
                 retries++;
                 if (error.message.includes('429')) {
-                    const waitTime = delay * Math.pow(2, retries - 1);
+                    const waitTime = delay * Math.pow(2, retries);
                     logger.debug(`Rate limited, waiting ${waitTime}ms before retry ${retries}/${maxRetries}`);
                     await new Promise(resolve => setTimeout(resolve, waitTime));
-                    delay = Math.min(delay * 2, 10000); // Cap maximum delay at 10 seconds
+                    delay = Math.min(delay * 2, 15000);
                 } else if (retries === maxRetries) {
                     throw error;
                 }
             }
         }
-        return null; // Return null if all retries failed
+        return null;
     }
 
     async initialize() {
+        this.startTime = Date.now() / 1000;
+        
         try {
             const version = await this.connection.getVersion();
             logger.info('Transaction Monitor Connected', {
                 version: version['solana-core'],
-                network: Config.SOLANA_NETWORK,
-                rpcUrl: Config.SOLANA_RPC_URL,
+                network: config.SOLANA_NETWORK,
+                rpcUrl: config.SOLANA_RPC_URL,
                 featureSet: version['feature-set']
             });
         } catch (error) {
             logger.error('Failed to connect to Solana network', {
                 error: error.message,
-                network: Config.SOLANA_NETWORK,
-                rpcUrl: Config.SOLANA_RPC_URL
+                network: config.SOLANA_NETWORK,
+                rpcUrl: config.SOLANA_RPC_URL
             });
             throw error;
         }
+
+        return this;
     }
 
     getWalletName(address) {
@@ -86,22 +160,45 @@ class TransactionMonitor {
 
     async validateWalletAddress(address) {
         try {
+            // First validate the address format
+            if (!address || typeof address !== 'string') {
+                logger.warn('Invalid wallet address format', { address });
+                return false;
+            }
+
+            try {
+                const pubKey = new PublicKey(address);
+                if (!PublicKey.isOnCurve(pubKey.toBuffer())) {
+                    logger.warn('Invalid wallet address: not on ed25519 curve', { address });
+                    return false;
+                }
+            } catch (error) {
+                logger.warn('Invalid wallet address format', { 
+                    address,
+                    error: error.message 
+                });
+                return false;
+            }
+
+            // Then check if account exists
             const pubKey = new PublicKey(address);
             const accountInfo = await this.connection.getAccountInfo(pubKey);
             const walletName = this.getWalletName(address);
+            
             if (accountInfo === null) {
-                logger.warn(`Wallet not found on ${Config.SOLANA_NETWORK}`, {
+                logger.warn(`Wallet not found on ${config.SOLANA_NETWORK}`, {
                     wallet: walletName,
                     address,
-                    environment: process.env.NODE_ENV || 'development'
+                    network: config.SOLANA_NETWORK
                 });
+                return false;
             }
-            return accountInfo !== null;
+            
+            return true;
         } catch (error) {
-            logger.warn(`Invalid wallet address`, {
+            logger.warn(`Failed to validate wallet address`, {
                 address,
                 wallet: this.getWalletName(address),
-                environment: process.env.NODE_ENV || 'development',
                 error: error.message
             });
             return false;
@@ -211,14 +308,37 @@ class TransactionMonitor {
 
     async getTransactionDetails(signature) {
         try {
+            logger.debug('Fetching transaction details', {
+                signature,
+                rpcUrl: config.SOLANA_RPC_URL,
+                options: {
+                    maxSupportedTransactionVersion: 0
+                }
+            });
+
             const transaction = await this.connection.getParsedTransaction(signature, {
                 maxSupportedTransactionVersion: 0
             });
             
-            if (!transaction) return null;
+            logger.debug('Raw transaction response', {
+                signature,
+                found: !!transaction,
+                blockTime: transaction?.blockTime,
+                numAccounts: transaction?.transaction?.message?.accountKeys?.length
+            });
+
+            if (!transaction) {
+                logger.debug('Transaction not found', { signature });
+                return null;
+            }
 
             // Skip transactions that occurred before bot start
             if (transaction.blockTime < this.startTime) {
+                logger.debug('Transaction occurred before bot start', {
+                    signature,
+                    txTime: transaction.blockTime,
+                    botStartTime: this.startTime
+                });
                 return null;
             }
 
@@ -246,7 +366,8 @@ class TransactionMonitor {
                 }
             }
 
-            return {
+            // Process transaction details...
+            const details = {
                 signature,
                 timestamp: new Date(transaction.blockTime * 1000),
                 sender: transaction.transaction.message.accountKeys[0].toString(),
@@ -255,10 +376,23 @@ class TransactionMonitor {
                 type: this.determineTransactionType(transaction),
                 raw: transaction
             };
+
+            logger.debug('Processed transaction details', {
+                signature,
+                timestamp: details.timestamp,
+                sender: details.sender,
+                solAmount: details.solAmount,
+                type: details.type
+            });
+
+            return details;
+
         } catch (error) {
-            logger.logError(error, { 
+            logger.error('Failed to get transaction details', { 
                 context: 'TransactionMonitor.getTransactionDetails',
-                signature 
+                signature,
+                error: error.message,
+                stack: error.stack
             });
             return null;
         }
@@ -276,132 +410,87 @@ class TransactionMonitor {
     async monitorWalletTransactions(address) {
         try {
             const walletName = this.getWalletName(address);
+            
+            // Validate address before proceeding
             const isValid = await this.validateWalletAddress(address);
             if (!isValid) return;
 
-            // Add delay between monitoring different wallets
-            await this.throttleRequest();
-
-            // Get token balances with retry
-            const walletAssets = require('./wallet-assets');
-            const tokenBalances = await this.retryWithBackoff(async () => 
-                walletAssets.getAllTokenBalances(address)
-            );
-
-            // Log wallet status
-            if (address === Config.SOLANA_WALLET_ADDRESS) {
-                logger.userWallet.info('Monitored Wallet Status', {
-                    wallet: walletName,
-                    address,
-                    network: Config.SOLANA_NETWORK,
-                    tokenHoldings: tokenBalances?.map(token => ({
-                        name: token.name,
-                        symbol: token.symbol,
-                        tokenAddress: token.mint,
-                        balance: token.balance
-                    })) || []
-                });
-            } else {
-                // Watched wallet logging
-                logger.watchedWallet.info('Monitored Wallet Status', {
-                    wallet: walletName,
-                    address,
-                    network: Config.SOLANA_NETWORK,
-                    tokenHoldings: tokenBalances.map(token => ({
-                        name: token.name,
-                        symbol: token.symbol,
-                        tokenAddress: token.mint,
-                        balance: token.balance
-                    }))
-                });
-            }
-
-            const pubKey = new PublicKey(address);
-            
-            try {
-                // Get recent transactions with retry and validation
-                const signatures = await this.retryWithBackoff(async () => {
-                    const response = await this.connection.getSignaturesForAddress(
+            // Get recent transactions
+            await this.queueRequest(async () => {
+                try {
+                    const pubKey = new PublicKey(address);
+                    
+                    // Get signatures without the until parameter first
+                    const signatures = await this.connection.getSignaturesForAddress(
                         pubKey,
                         { 
-                            limit: 10,
-                            until: this.startTime.toString()
+                            limit: 5,
+                            commitment: 'confirmed'
                         }
                     );
-                    
-                    // Validate response
-                    if (!response || !Array.isArray(response)) {
-                        logger.warn('Invalid signature response format', {
+
+                    if (!signatures || !Array.isArray(signatures)) {
+                        logger.debug('No recent transactions found', {
                             wallet: walletName,
-                            address,
-                            responseType: typeof response
+                            address
                         });
-                        return [];
-                    }
-                    
-                    return response;
-                });
-
-                // Increase delay if we got rate limited
-                if (signatures.length === 0) {
-                    this.requestDelay = Math.min(this.requestDelay * 2, 5000); // Max 5s delay
-                    logger.debug(`Increased request delay to ${this.requestDelay}ms`);
-                } else {
-                    this.requestDelay = Math.max(500, this.requestDelay * 0.8); // Decrease delay but not below 500ms
-                }
-
-                // Process transactions with delay between each
-                for (const sig of signatures) {
-                    if (!sig || !sig.signature) {
-                        logger.warn('Invalid signature object', { sig });
-                        continue;
+                        return;
                     }
 
-                    if (this.watchedTransactions.has(sig.signature)) continue;
-                    
-                    await this.throttleRequest();
-                    const txDetails = await this.getTransactionDetails(sig.signature);
-                    
-                    if (txDetails) {
-                        this.watchedTransactions.set(sig.signature, txDetails);
-                        
-                        const logData = {
-                            wallet: walletName,
-                            address,
-                            network: Config.SOLANA_NETWORK,
-                            signature: sig.signature,
-                            type: txDetails.type,
-                            solAmount: `${txDetails.solAmount / 1e9} SOL`,
-                            timestamp: txDetails.timestamp,
-                            timeSinceBotStart: `${((Date.now() / 1000) - this.startTime).toFixed(2)} seconds`,
-                            tokenTransfers: txDetails.tokenTransfers.map(transfer => ({
-                                token: transfer.token.name,
-                                symbol: transfer.token.symbol,
-                                tokenAddress: transfer.token.address,
-                                amount: transfer.amount,
-                                type: transfer.type,
-                                verified: transfer.verified
-                            }))
-                        };
+                    // Filter signatures by timestamp after fetching
+                    const validSignatures = signatures.filter(sig => 
+                        sig.blockTime && sig.blockTime >= this.startTime
+                    );
 
-                        // Log to appropriate file based on wallet type
-                        if (address === Config.SOLANA_WALLET_ADDRESS) {
-                            logger.userWallet.info('New transaction detected', logData);
-                        } else {
-                            logger.watchedWallet.info('New transaction detected', logData);
+                    // Process valid signatures
+                    for (const sig of validSignatures.slice(0, 3)) {
+                        if (!sig || !sig.signature) {
+                            logger.debug('Invalid signature object', { sig });
+                            continue;
+                        }
+
+                        if (this.watchedTransactions.has(sig.signature)) continue;
+
+                        const txDetails = await this.getTransactionDetails(sig.signature);
+                        if (txDetails) {
+                            this.watchedTransactions.set(sig.signature, txDetails);
+                            
+                            const logData = {
+                                wallet: walletName,
+                                address,
+                                network: config.SOLANA_NETWORK,
+                                signature: sig.signature,
+                                type: txDetails.type,
+                                solAmount: `${txDetails.solAmount / 1e9} SOL`,
+                                timestamp: txDetails.timestamp,
+                                timeSinceBotStart: `${((Date.now() / 1000) - this.startTime).toFixed(2)} seconds`,
+                                tokenTransfers: txDetails.tokenTransfers.map(transfer => ({
+                                    token: transfer.token.name,
+                                    symbol: transfer.token.symbol,
+                                    tokenAddress: transfer.token.address,
+                                    amount: transfer.amount,
+                                    type: transfer.type,
+                                    verified: transfer.verified
+                                }))
+                            };
+
+                            if (address === config.SOLANA_WALLET_ADDRESS) {
+                                logger.userWallet.info('New transaction detected', logData);
+                            } else {
+                                logger.watchedWallet.info('New transaction detected', logData);
+                            }
                         }
                     }
-                }
-            } catch (error) {
-                if (error.message.includes('Invalid param')) {
-                    logger.warn(`No recent transactions found`, {
+                } catch (error) {
+                    logger.warn('Error fetching transactions', {
                         wallet: walletName,
-                        network: Config.SOLANA_NETWORK
+                        address,
+                        error: error.message,
+                        stack: error.stack
                     });
-                } else {
-                    throw error;
                 }
-            }
+            });
+
         } catch (error) {
             if (!error.message.includes('429')) {
                 logger.logError(error, { 
@@ -422,22 +511,75 @@ class TransactionMonitor {
         });
     }
 
-    // Update the start method to add delay between wallet monitoring
+    // Add method for initial check
+    async performInitialCheck(wallets) {
+        logger.info('Performing initial wallet check...');
+        
+        for (const wallet of wallets) {
+            await this.queueRequest(async () => {
+                await this.monitorWalletTransactions(wallet.address);
+            });
+        }
+
+        this.hasInitialCheck = true;
+        logger.info('Initial wallet check completed');
+        
+        // Reset processor interval to one minute
+        if (this.processorInterval) {
+            clearInterval(this.processorInterval);
+        }
+        this.startRequestProcessor();
+    }
+
+    // Update start method to handle initial check
     async start() {
         const wallets = walletConfig.getActiveWallets();
-        for (const wallet of wallets) {
-            await this.throttleRequest(); // Add delay between each wallet
-            await this.monitorWalletTransactions(wallet.address);
+        
+        // Perform initial check
+        await this.performInitialCheck(wallets);
+
+        // Then set up regular monitoring
+        return new Promise((resolve) => {
+            this.monitoringInterval = setInterval(async () => {
+                for (const wallet of wallets) {
+                    await this.queueRequest(async () => {
+                        await this.monitorWalletTransactions(wallet.address);
+                    });
+                }
+            }, this.requestDelay);
+            resolve();
+        });
+    }
+
+    cleanup() {
+        // Clear all intervals
+        const intervals = [
+            'counterInterval',
+            'processorInterval',
+            'monitoringInterval'
+        ];
+
+        intervals.forEach(interval => {
+            if (this[interval]) {
+                clearInterval(this[interval]);
+                this[interval] = undefined;
+            }
+        });
+
+        // Clear queues and counters
+        this.requestQueue = [];
+        this.requestsThisMinute = 0;
+        this.totalRequests = 0;
+        this.watchedTransactions.clear();
+
+        // Clear any console output
+        if (!this.isTestMode) {
+            process.stdout.write('\r\x1b[K');
         }
     }
 }
 
-// Create and initialize the monitor
-const monitor = new TransactionMonitor();
-monitor.initialize().catch(error => {
-    logger.error('Failed to initialize Transaction Monitor', {
-        error: error.message
-    });
-});
-
-module.exports = monitor; 
+// Create and export instances
+export const monitor = new TransactionMonitor();
+export const testMonitor = new TransactionMonitor({ isTestMode: true });
+export default monitor; 

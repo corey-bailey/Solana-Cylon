@@ -1,41 +1,41 @@
-const { Connection, PublicKey } = require('@solana/web3.js');
-const Config = require('./config/config');
-const logger = require('./utils/logger');
-const walletConfig = require('./services/wallet-config');
-const transactionMonitor = require('./services/transaction-monitor');
-const { logEnvironment } = require('./utils/env-logger');
-const walletAssets = require('./services/wallet-assets');
+import { Connection, PublicKey } from '@solana/web3.js';
+import { monitor } from './services/transaction-monitor.js';
+import walletConfig from './services/wallet-config.js';
+import logger from './utils/logger.js';
+import config from './config/config.js';
+import { logEnvironment } from './utils/env-logger.js';
+import walletAssets from './services/wallet-assets.js';
 
 class TradingBot {
     constructor() {
         // Log environment variables first
         logEnvironment();
         
-        this.connection = new Connection(Config.SOLANA_RPC_URL);
+        this.connection = new Connection(config.SOLANA_RPC_URL);
         this.isRunning = false;
         this.userBalance = 0;
         this.monitoringInterval = null;
 
         logger.info('Trading Bot Initialized', {
             environment: process.env.NODE_ENV || 'development',
-            network: Config.SOLANA_NETWORK,
-            rpcUrl: Config.SOLANA_RPC_URL
+            network: config.SOLANA_NETWORK,
+            rpcUrl: config.SOLANA_RPC_URL
         });
     }
 
     async updateUserBalance() {
         try {
-            if (!Config.SOLANA_WALLET_ADDRESS) {
+            if (!config.SOLANA_WALLET_ADDRESS) {
                 logger.warn('No wallet address configured for balance tracking');
                 return;
             }
             
             // Get SOL balance
-            const pubKey = new PublicKey(Config.SOLANA_WALLET_ADDRESS);
+            const pubKey = new PublicKey(config.SOLANA_WALLET_ADDRESS);
             this.userBalance = await this.connection.getBalance(pubKey) / 1e9;
             
             // Get token balances
-            await walletAssets.getAllTokenBalances(Config.SOLANA_WALLET_ADDRESS);
+            await walletAssets.getAllTokenBalances(config.SOLANA_WALLET_ADDRESS);
             
         } catch (error) {
             logger.logError(error, { context: 'TradingBot.updateUserBalance' });
@@ -45,7 +45,7 @@ class TradingBot {
     async monitorWallets() {
         const activeWallets = walletConfig.getActiveWallets();
         for (const wallet of activeWallets) {
-            await transactionMonitor.monitorWalletTransactions(wallet.address);
+            await monitor.monitorWalletTransactions(wallet.address);
         }
     }
 
@@ -53,16 +53,16 @@ class TradingBot {
         try {
             this.isRunning = true;
             logger.info('Connecting to Solana network...', {
-                network: Config.SOLANA_NETWORK,
-                rpcUrl: Config.SOLANA_RPC_URL
+                network: config.SOLANA_NETWORK,
+                rpcUrl: config.SOLANA_RPC_URL
             });
 
             // Verify connection
             const version = await this.connection.getVersion();
             logger.info('Connected to Solana network', {
                 version: version['solana-core'],
-                network: Config.SOLANA_NETWORK,
-                rpcUrl: Config.SOLANA_RPC_URL,
+                network: config.SOLANA_NETWORK,
+                rpcUrl: config.SOLANA_RPC_URL,
                 featureSet: version['feature-set']
             });
 
@@ -82,20 +82,20 @@ class TradingBot {
                 logger.logError(error, { context: 'Config Watcher' });
             });
 
-            // Set up periodic monitoring
+            // Set up periodic monitoring with one minute interval
             this.monitoringInterval = setInterval(async () => {
                 await this.monitorWallets();
                 await walletConfig.updateWalletBalances();
                 await this.updateUserBalance();
-            }, 10000); // Check every 10 seconds
+            }, 60000); // Check every minute
 
             logger.info('Bot is running and monitoring wallets...');
 
         } catch (error) {
             logger.logError(error, { 
                 context: 'Bot Startup',
-                network: Config.SOLANA_NETWORK,
-                rpcUrl: Config.SOLANA_RPC_URL
+                network: config.SOLANA_NETWORK,
+                rpcUrl: config.SOLANA_RPC_URL
             });
             this.stop();
         }
@@ -106,25 +106,56 @@ class TradingBot {
         if (this.monitoringInterval) {
             clearInterval(this.monitoringInterval);
         }
+        // Cleanup transaction monitor
+        monitor.cleanup();
         logger.info('Stopping bot...');
         process.exit(0);
     }
 }
 
-// Handle shutdown gracefully
+async function main() {
+    try {
+        // Initialize the monitor
+        await monitor.initialize();
+
+        // Start monitoring
+        await monitor.start();
+
+        // Log active wallets
+        const activeWallets = walletConfig.getActiveWallets();
+        logger.info('Monitoring started', {
+            activeWallets: activeWallets.length,
+            network: config.SOLANA_NETWORK,
+            rpcUrl: config.SOLANA_RPC_URL
+        });
+
+    } catch (error) {
+        logger.error('Failed to start monitoring', {
+            error: error.message,
+            stack: error.stack
+        });
+        process.exit(1);
+    }
+}
+
+// Handle process termination
 process.on('SIGINT', () => {
-    logger.info('Received SIGINT. Shutting down...');
+    logger.info('Shutting down...');
+    monitor.cleanup();
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    logger.info('Received SIGTERM. Shutting down...');
+    logger.info('Shutting down...');
+    monitor.cleanup();
     process.exit(0);
 });
 
-// Start the bot
-const bot = new TradingBot();
-bot.start().catch(error => {
-    logger.logError(error, { context: 'Bot Main' });
+// Start the application
+main().catch(error => {
+    logger.error('Unhandled error in main', {
+        error: error.message,
+        stack: error.stack
+    });
     process.exit(1);
 });

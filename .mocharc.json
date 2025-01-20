@@ -1,0 +1,7 @@
+{
+  "require": "src/tests/setup.js",
+  "extensions": ["js"],
+  "spec": "src/tests/**/*.test.js",
+  "watch-files": ["src/**/*.js"],
+  "timeout": 10000
+} 

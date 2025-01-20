@@ -1,8 +1,8 @@
-const fs = require('fs').promises;
-const { parse } = require('csv-parse');
-const logger = require('../utils/logger');
-const { PublicKey } = require('@solana/web3.js');
-const walletAssets = require('./wallet-assets');
+import fs from 'fs';
+import { parse } from 'csv-parse/sync';
+import { PublicKey } from '@solana/web3.js';
+import logger from '../utils/logger.js';
+import walletAssets from './wallet-assets.js';
 
 class WalletConfig {
     constructor() {
@@ -10,68 +10,63 @@ class WalletConfig {
         this.configPath = 'data/wallets.csv';
         this.lastBalanceUpdate = 0;
         this.balanceUpdateInterval = 60000; // Update balances every minute
+        this.loadWallets();
     }
 
-    // Validate Solana wallet address
-    validateAddress(address) {
+    loadWallets() {
         try {
-            new PublicKey(address);
+            const csvData = fs.readFileSync(this.configPath, 'utf-8');
+            const records = parse(csvData, {
+                columns: true,
+                skip_empty_lines: true
+            });
+
+            for (const record of records) {
+                if (this.validateWallet(record)) {
+                    this.wallets.set(record.address, {
+                        name: record.name,
+                        address: record.address,
+                        active: record.active.toLowerCase() === 'true',
+                        riskLevel: record.risk_level,
+                        maxTradeSize: parseFloat(record.max_trade_size)
+                    });
+                }
+            }
+
+            logger.info('Wallets loaded successfully', {
+                totalWallets: this.wallets.size,
+                activeWallets: this.getActiveWallets().length
+            });
+
+        } catch (error) {
+            logger.error('Failed to load wallets', {
+                error: error.message,
+                stack: error.stack
+            });
+        }
+    }
+
+    validateWallet(wallet) {
+        try {
+            if (!wallet.address || !wallet.name || wallet.active === undefined) {
+                logger.warn('Invalid wallet record', { wallet });
+                return false;
+            }
+
+            new PublicKey(wallet.address);
             return true;
         } catch (error) {
+            logger.warn('Invalid wallet address', {
+                address: wallet.address,
+                error: error.message
+            });
             return false;
         }
     }
 
-    // Parse and validate CSV data
-    async loadConfig() {
-        try {
-            const fileContent = await fs.readFile(this.configPath, 'utf-8');
-            
-            return new Promise((resolve, reject) => {
-                parse(fileContent, {
-                    columns: true,
-                    skip_empty_lines: true,
-                    trim: true
-                }, (err, records) => {
-                    if (err) {
-                        reject(err);
-                        return;
-                    }
-
-                    this.wallets.clear();
-                    
-                    records.forEach(record => {
-                        if (!this.validateAddress(record.address)) {
-                            logger.warn(`Invalid wallet address: ${record.address}`);
-                            return;
-                        }
-
-                        this.wallets.set(record.address, {
-                            name: record.name,
-                            active: record.active.toLowerCase() === 'true',
-                            riskLevel: record.risk_level,
-                            maxTradeSize: parseFloat(record.max_trade_size)
-                        });
-                    });
-
-                    logger.info(`Loaded ${this.wallets.size} wallet configurations`);
-                    resolve(this.wallets);
-                });
-            });
-        } catch (error) {
-            logger.logError(error, { context: 'WalletConfig.loadConfig' });
-            throw error;
-        }
-    }
-
-    // Get active wallets
     getActiveWallets() {
-        return Array.from(this.wallets.entries())
-            .filter(([_, config]) => config.active)
-            .map(([address, config]) => ({
-                address,
-                ...config
-            }));
+        return Array.from(this.wallets.values())
+            .filter(wallet => wallet.active);
     }
 
     // Watch for config changes and reload
@@ -81,7 +76,7 @@ class WalletConfig {
             for await (const event of watcher) {
                 if (event.eventType === 'change') {
                     logger.info('Wallet configuration file changed, reloading...');
-                    await this.loadConfig();
+                    await this.loadWallets();
                 }
             }
         } catch (error) {
@@ -140,4 +135,5 @@ class WalletConfig {
     }
 }
 
-module.exports = new WalletConfig(); 
+export const walletConfig = new WalletConfig();
+export default walletConfig; 

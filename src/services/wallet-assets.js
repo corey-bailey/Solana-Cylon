@@ -1,8 +1,9 @@
-const { Connection, PublicKey } = require('@solana/web3.js');
-const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-const { Metadata } = require('@metaplex-foundation/mpl-token-metadata');
-const Config = require('../config/config');
-const logger = require('../utils/logger');
+import { Connection, PublicKey } from '@solana/web3.js';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import pkg from '@metaplex-foundation/mpl-token-metadata';
+const { Metadata } = pkg;
+import Config from '../config/config.js';
+import logger from '../utils/logger.js';
 
 class WalletAssets {
     constructor() {
@@ -142,4 +143,5 @@ class WalletAssets {
     }
 }
 
-module.exports = new WalletAssets(); 
+export const walletAssets = new WalletAssets();
+export default walletAssets; 
