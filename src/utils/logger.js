@@ -1,28 +1,25 @@
 import winston from 'winston';
-import 'winston-syslog';
-import Config from '../config/config.js';
+import config from '../config/config.js';
 
-// Create custom format
-const customFormat = winston.format.printf(({ level, message, timestamp, ...metadata }) => {
-    let msg = `${timestamp} [${level}]: ${message}`;
-    if (Object.keys(metadata).length > 0) {
-        msg += ` ${JSON.stringify(metadata, null, 2)}`;
-    }
-    return msg;
-});
+const logFormat = winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+);
 
-// Create logger instance
 const logger = winston.createLogger({
-    level: Config.LOG_LEVEL || 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.metadata({ fillExcept: ['message', 'level', 'timestamp'] }),
-        customFormat
-    ),
+    level: config.LOG_LEVEL || 'info',
+    format: logFormat,
     transports: [
+        // Write all logs to console
+        new winston.transports.Console(),
+        
+        // Write all logs to their respective files
         new winston.transports.File({ 
             filename: 'logs/error.log', 
             level: 'error' 
+        }),
+        new winston.transports.File({ 
+            filename: 'logs/system.log' 
         }),
         new winston.transports.File({ 
             filename: 'logs/combined.log' 
@@ -30,25 +27,27 @@ const logger = winston.createLogger({
     ]
 });
 
-// Add console transport in development
-if (process.env.NODE_ENV !== 'production') {
-    logger.add(new winston.transports.Console({
-        format: winston.format.combine(
-            winston.format.colorize(),
-            winston.format.simple()
-        )
-    }));
-}
-
-// Add specialized loggers for different types of transactions
-logger.userWallet = logger.child({ 
-    logType: 'user-wallet',
-    filename: 'logs/user-wallet.log'
+// Add specialized loggers for wallet monitoring
+logger.userWallet = winston.createLogger({
+    level: 'info',
+    format: logFormat,
+    transports: [
+        new winston.transports.File({ 
+            filename: 'logs/user-wallet.log' 
+        }),
+        new winston.transports.Console()
+    ]
 });
 
-logger.watchedWallet = logger.child({ 
-    logType: 'watched-wallet',
-    filename: 'logs/watched-wallets.log'
+logger.watchedWallet = winston.createLogger({
+    level: 'info',
+    format: logFormat,
+    transports: [
+        new winston.transports.File({ 
+            filename: 'logs/watched-wallets.log' 
+        }),
+        new winston.transports.Console()
+    ]
 });
 
-export { logger as default };
+export default logger;

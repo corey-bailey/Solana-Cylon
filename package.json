@@ -4,7 +4,10 @@
   "description": "Solana trading bot for copying trades",
   "main": "src/index.js",
   "scripts": {
-    "start": "cross-env NODE_ENV=production node src/index.js",
+    "start": "cross-env NODE_ENV=production node scripts/start.js",
+    "start:dev": "cross-env NODE_ENV=development node scripts/start.js",
+    "start:prod": "cross-env NODE_ENV=production node scripts/start.js",
+    "clear-logs": "rm -rf logs/* && node -e \"require('./src/utils/setup-logs.js').setupLogDirectories()\"",
     "test": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/**/*.test.js'",
     "test:setup": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/setup.js'",
     "test:token": "node --experimental-vm-modules node_modules/mocha/bin/mocha.js './src/tests/token-info.test.js'",

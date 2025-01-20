@@ -1,66 +1,70 @@
 import fs from 'fs';
-import { parse } from 'csv-parse/sync';
+import { parse } from 'csv-parse';
 import { PublicKey } from '@solana/web3.js';
 import logger from '../utils/logger.js';
+import config from '../config/config.js';
 import walletAssets from './wallet-assets.js';
 
 class WalletConfig {
     constructor() {
         this.wallets = new Map();
-        this.configPath = 'data/wallets.csv';
+        this.csvPath = config.WALLETS_CSV_PATH;
         this.lastBalanceUpdate = 0;
         this.balanceUpdateInterval = 60000; // Update balances every minute
-        this.loadWallets();
+        this.loadConfig();
     }
 
-    loadWallets() {
+    async loadConfig() {
         try {
-            const csvData = fs.readFileSync(this.configPath, 'utf-8');
-            const records = parse(csvData, {
-                columns: true,
-                skip_empty_lines: true
+            logger.info('Loading wallet configuration', { path: this.csvPath });
+
+            const fileContent = fs.readFileSync(this.csvPath, 'utf-8');
+            const records = await new Promise((resolve, reject) => {
+                parse(fileContent, {
+                    columns: true,
+                    skip_empty_lines: true
+                }, (err, records) => {
+                    if (err) reject(err);
+                    else resolve(records);
+                });
             });
 
+            this.wallets.clear();
+            
             for (const record of records) {
-                if (this.validateWallet(record)) {
+                if (!record.address || !record.name) continue;
+                
+                try {
+                    // Validate the address
+                    new PublicKey(record.address);
+                    
                     this.wallets.set(record.address, {
                         name: record.name,
                         address: record.address,
-                        active: record.active.toLowerCase() === 'true',
-                        riskLevel: record.risk_level,
-                        maxTradeSize: parseFloat(record.max_trade_size)
+                        active: record.active === 'true',
+                        riskLevel: record.risk_level || 'medium',
+                        maxTradeSize: parseFloat(record.max_trade_size) || 1.0,
+                        balance: 0
+                    });
+                } catch (error) {
+                    logger.error('Invalid wallet address in config', {
+                        address: record.address,
+                        error: error.message
                     });
                 }
             }
 
-            logger.info('Wallets loaded successfully', {
+            logger.info('Wallet configuration loaded', {
                 totalWallets: this.wallets.size,
                 activeWallets: this.getActiveWallets().length
             });
 
         } catch (error) {
-            logger.error('Failed to load wallets', {
+            logger.error('Failed to load wallet configuration', {
                 error: error.message,
-                stack: error.stack
+                path: this.csvPath
             });
-        }
-    }
-
-    validateWallet(wallet) {
-        try {
-            if (!wallet.address || !wallet.name || wallet.active === undefined) {
-                logger.warn('Invalid wallet record', { wallet });
-                return false;
-            }
-
-            new PublicKey(wallet.address);
-            return true;
-        } catch (error) {
-            logger.warn('Invalid wallet address', {
-                address: wallet.address,
-                error: error.message
-            });
-            return false;
+            throw error;
         }
     }
 
@@ -69,19 +73,8 @@ class WalletConfig {
             .filter(wallet => wallet.active);
     }
 
-    // Watch for config changes and reload
-    async watchConfig() {
-        try {
-            const watcher = fs.watch(this.configPath);
-            for await (const event of watcher) {
-                if (event.eventType === 'change') {
-                    logger.info('Wallet configuration file changed, reloading...');
-                    await this.loadWallets();
-                }
-            }
-        } catch (error) {
-            logger.logError(error, { context: 'WalletConfig.watchConfig' });
-        }
+    getWallet(address) {
+        return this.wallets.get(address);
     }
 
     async updateWalletBalances() {
@@ -135,5 +128,4 @@ class WalletConfig {
     }
 }
 
-export const walletConfig = new WalletConfig();
-export default walletConfig; 
+export default new WalletConfig(); 
