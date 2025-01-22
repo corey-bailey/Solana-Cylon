@@ -27,24 +27,46 @@ class TradingBot {
         });
     }
 
-    async updateUserBalance() {
+    async scanInitialAssets() {
+        logger.info('Performing initial asset scan...');
+
         try {
-            if (!config.SOLANA_WALLET_ADDRESS) {
-                logger.warn('No wallet address configured for balance tracking');
-                return;
+            // Get user wallet assets
+            if (config.SOLANA_WALLET_ADDRESS) {
+                logger.info('Scanning user wallet assets...');
+                const userAssets = await walletAssets.getAllTokenBalances(config.SOLANA_WALLET_ADDRESS);
+                logger.info('User wallet assets:', {
+                    address: config.SOLANA_WALLET_ADDRESS,
+                    solBalance: userAssets.solBalance,
+                    tokens: userAssets.tokens.map(t => ({
+                        symbol: t.symbol,
+                        balance: t.balance
+                    }))
+                });
             }
-            
-            // Get SOL balance
-            const pubKey = new PublicKey(config.SOLANA_WALLET_ADDRESS);
-            this.userBalance = await this.connection.getBalance(pubKey) / 1e9;
-            
-            // Get token balances
-            await walletAssets.getAllTokenBalances(config.SOLANA_WALLET_ADDRESS);
-            
+
+            // Get watched wallet assets
+            const activeWallets = walletConfig.getActiveWallets();
+            logger.info(`Scanning ${activeWallets.length} watched wallets...`);
+
+            for (const wallet of activeWallets) {
+                const assets = await walletAssets.getAllTokenBalances(wallet.address);
+                logger.info('Watched wallet assets:', {
+                    name: wallet.name,
+                    address: wallet.address,
+                    solBalance: assets.solBalance,
+                    tokens: assets.tokens.map(t => ({
+                        symbol: t.symbol,
+                        balance: t.balance
+                    }))
+                });
+            }
+
+            logger.info('Initial asset scan complete');
         } catch (error) {
-            logger.error('Failed to update balance', { 
+            logger.error('Failed to complete initial asset scan', {
                 error: error.message,
-                context: 'TradingBot.updateUserBalance'
+                stack: error.stack
             });
         }
     }
@@ -67,20 +89,13 @@ class TradingBot {
                 rpcUrl: config.SOLANA_RPC_URL
             });
 
-            // Get initial balances
-            await walletConfig.updateWalletBalances();
-            await this.updateUserBalance();
+            // Perform initial asset scan
+            await this.scanInitialAssets();
 
             // Start transaction monitoring
             await monitor.start();
 
-            // Set up periodic monitoring
-            this.monitoringInterval = setInterval(async () => {
-                await walletConfig.updateWalletBalances();
-                await this.updateUserBalance();
-            }, 60000); // Check every minute
-
-            logger.info('Bot is running and monitoring wallets');
+            logger.info('Bot is running and monitoring transactions');
 
         } catch (error) {
             logger.error('Failed to start bot', {
@@ -93,9 +108,6 @@ class TradingBot {
 
     stop() {
         this.isRunning = false;
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-        }
         monitor.cleanup();
         logger.info('Bot stopped');
     }

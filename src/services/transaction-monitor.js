@@ -9,12 +9,27 @@ import walletConfig from './wallet-config.js';
 class TransactionMonitor {
     constructor(options = {}) {
         this.isTestMode = options.isTestMode || false;
-        this.connection = new Connection(config.SOLANA_RPC_URL);
+        this.connection = new Connection(config.SOLANA_RPC_URL, {
+            commitment: 'confirmed',
+            confirmTransactionInitialTimeout: 60000,
+            httpHeaders: {},
+            wsEndpoint: config.SOLANA_WS_URL,
+            fetch: async (url, options) => {
+                const response = await fetch(url, options);
+                if (response.status === 429) {
+                    const retryAfter = 10000;
+                    console.log(`Server responded with 429 Too Many Requests. Retrying after ${retryAfter/1000}s delay...`);
+                    await new Promise(resolve => setTimeout(resolve, retryAfter));
+                    return fetch(url, options);
+                }
+                return response;
+            }
+        });
         this.watchedTransactions = new Map();
         this.startTime = 0; // Initialize to 0
         this.lastRequestTime = 0;
-        this.requestDelay = 60000;   // One request per minute
-        this.maxRequestsPerMinute = 6;
+        this.requestDelay = 20000;   // Changed to 20 seconds
+        this.maxRequestsPerMinute = 20; // Adjusted for 20-second interval
         this.requestCount = 0;
         this.requestResetTime = Date.now();
         this.totalRequests = 0;
@@ -28,7 +43,7 @@ class TransactionMonitor {
             network: config.SOLANA_NETWORK,
             rpcUrl: config.SOLANA_RPC_URL,
             startTime: new Date(this.startTime * 1000).toISOString(),
-            checkInterval: '60 seconds'
+            checkInterval: '20 seconds' // Updated to reflect new interval
         });
 
         // In test mode, we process requests immediately and don't start intervals
@@ -64,7 +79,7 @@ class TransactionMonitor {
         }, 1000);
     }
 
-    // Update request processor to handle initial check
+    // Update request processor to use appropriate interval for queue processing
     startRequestProcessor() {
         this.processorInterval = setInterval(async () => {
             if (this.requestQueue.length > 0) {
@@ -80,7 +95,7 @@ class TransactionMonitor {
                 this.totalRequests++;
                 this.requestsThisMinute++;
             }
-        }, this.hasInitialCheck ? this.requestDelay : 5000); // Faster processing for initial check
+        }, this.hasInitialCheck ? 3000 : 1000); // Slightly slower queue processing
     }
 
     // Process request immediately (for tests)
@@ -107,8 +122,8 @@ class TransactionMonitor {
         return this.processRequest(operation);
     }
 
-    // Update retry with queued requests
-    async retryWithBackoff(operation, maxRetries = 3, initialDelay = 5000) {
+    // Update retry with queued requests and longer delays
+    async retryWithBackoff(operation, maxRetries = 3, initialDelay = 15000) {
         let retries = 0;
         let delay = initialDelay;
 
@@ -121,7 +136,7 @@ class TransactionMonitor {
                     const waitTime = delay * Math.pow(2, retries);
                     logger.debug(`Rate limited, waiting ${waitTime}ms before retry ${retries}/${maxRetries}`);
                     await new Promise(resolve => setTimeout(resolve, waitTime));
-                    delay = Math.min(delay * 2, 15000);
+                    delay = Math.min(delay * 2, 45000);
                 } else if (retries === maxRetries) {
                     throw error;
                 }

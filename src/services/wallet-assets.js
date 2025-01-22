@@ -40,56 +40,55 @@ class WalletAssets {
 
     async getAllTokenBalances(walletAddress) {
         try {
+            // Get SOL balance
             const pubKey = new PublicKey(walletAddress);
-            
-            // Get all token accounts for this wallet
+            const solBalance = await this.connection.getBalance(pubKey) / 1e9;
+
+            // Get token accounts
             const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
                 pubKey,
                 { programId: TOKEN_PROGRAM_ID }
             );
 
-            const balances = [];
-            
-            // Process each token account
-            for (const { account } of tokenAccounts.value) {
-                const parsedInfo = account.data.parsed.info;
-                const tokenBalance = parsedInfo.tokenAmount;
+            // Process token balances - filter non-zero balances and fetch metadata
+            const tokens = await Promise.all(
+                tokenAccounts.value
+                    .map(account => account.account.data.parsed.info)
+                    .filter(tokenData => tokenData.tokenAmount.uiAmount > 0)
+                    .map(async tokenData => {
+                        const metadata = await this.getTokenMetadata(tokenData.mint);
+                        return {
+                            mint: tokenData.mint,
+                            symbol: metadata?.symbol || `UNK-${tokenData.mint.slice(0, 4)}`,
+                            name: metadata?.name || `Unknown Token (${tokenData.mint.slice(0, 8)}...)`,
+                            balance: tokenData.tokenAmount.uiAmount,
+                            decimals: tokenData.tokenAmount.decimals
+                        };
+                    })
+            );
 
-                // Only include tokens with non-zero balance
-                if (tokenBalance.uiAmount > 0) {
-                    const mintAddress = parsedInfo.mint;
-                    const metadata = await this.getTokenMetadata(mintAddress);
-                    
-                    balances.push({
-                        mint: mintAddress,
-                        balance: tokenBalance.uiAmount,
-                        decimals: tokenBalance.decimals,
-                        name: metadata?.name || `Token: ${mintAddress.slice(0, 8)}...`,
-                        symbol: metadata?.symbol || 'UNKNOWN'
-                    });
-                }
-            }
-
-            // Sort by balance value
-            balances.sort((a, b) => b.balance - a.balance);
-
-            logger.info('Wallet Token Balances', {
+            logger.debug('Retrieved wallet balances', {
                 wallet: walletAddress,
-                solBalance: await this.getWalletBalance(walletAddress),
-                tokens: balances.map(b => ({
-                    name: b.name,
-                    symbol: b.symbol,
-                    balance: b.balance
-                }))
+                solBalance,
+                tokenCount: tokens.length
             });
 
-            return balances;
+            return {
+                solBalance,
+                tokens: tokens || [] // Ensure we always return an array
+            };
+
         } catch (error) {
-            logger.error('Failed to fetch token balances', {
+            logger.error('Failed to get wallet balances', {
                 wallet: walletAddress,
                 error: error.message
             });
-            return [];
+            
+            // Return a default structure on error
+            return {
+                solBalance: 0,
+                tokens: []
+            };
         }
     }
 
@@ -108,12 +107,13 @@ class WalletAssets {
     }
 
     async updateWalletBalances(addresses) {
-        for (const address of addresses) {
-            const balance = await this.getWalletBalance(address);
-            this.walletBalances.set(address, balance);
-            logger.info(`Updated wallet balance`, {
-                address,
-                balance: `${balance} SOL`
+        try {
+            for (const address of addresses) {
+                await this.getAllTokenBalances(address);
+            }
+        } catch (error) {
+            logger.error('Failed to update wallet balances', {
+                error: error.message
             });
         }
     }
